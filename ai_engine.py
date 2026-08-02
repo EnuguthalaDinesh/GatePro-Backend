@@ -318,20 +318,26 @@ def extract_questions_from_pdf(
         except Exception as e:
             print("PyPDF Extract Error:", e)
 
-    full_text = "\n\n".join([t[1] for t in raw_pages_text])
-    full_text = full_text.replace('\r\n', '\n').replace('\r', '\n')
+    # 4. Join and normalize full text across all pages
+    full_raw_text = "\n\n".join([t[1] for t in raw_pages_text])
 
-    # Clean out cover page, watermarks, headers, footers
-    cleaned_text = clean_pdf_raw_text(full_text)
-    cleaned_text = re.sub(r'https?://\S+|www\.\S+|\S+\.testbook\.com\S*', '', cleaned_text, flags=re.IGNORECASE)
-    cleaned_text = re.sub(r'Organizing\s*Institute.*?\n', '', cleaned_text, flags=re.IGNORECASE)
-    cleaned_text = re.sub(r'Page\s*\d+\s*of\s*\d+', '', cleaned_text, flags=re.IGNORECASE)
-    cleaned_text = re.sub(r'Chemical\s*Engineering\s*\([A-Z]+\)', '', cleaned_text, flags=re.IGNORECASE)
-    cleaned_text = re.sub(r'Q\.\d+\s*[\–\-\—\to\s]+\s*Q\.\d+\s*Carry.*?\n', '', cleaned_text, flags=re.IGNORECASE)
+    # Pre-process text to join headers and option labels split across table cells
+    normalized_text = full_raw_text.replace('\r\n', '\n').replace('\r', '\n')
+    normalized_text = clean_pdf_raw_text(normalized_text)
+    normalized_text = re.sub(r'https?://\S+|www\.\S+|\S+\.testbook\.com\S*', '', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'Organizing\s*Institute.*?\n', '', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'Page\s*\d+\s*of\s*\d+', '', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'Chemical\s*Engineering\s*\([A-Z]+\)', '', normalized_text, flags=re.IGNORECASE)
+
+    # Normalize split Q headers & split option labels
+    normalized_text = re.sub(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,2})\b[\.\:\-\)]?\s*\n\s*', r'\nQ.\1 ', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'\(([A-Da-d])\)\s*\n\s*', r'(\1) ', normalized_text)
+    normalized_text = re.sub(r'(?:^|\n)\s*([A-Da-d])[\.\:\)]\s*\n\s*', r'(\1) ', normalized_text)
+
     parsed_questions_dict = {}
 
-    # Split text into blocks starting at Q.1, Q.2, ... Q.65
-    raw_blocks = re.split(r'\n(?=\s*Q\s*[\.\:\-\_\s]*\d{1,2}\b)', "\n" + cleaned_text, flags=re.IGNORECASE)
+    # Primary Splitter: Split into blocks by question header Q.1, Q.2 ... Q.65
+    raw_blocks = re.split(r'\n(?=\s*Q\s*[\.\:\-\_\s]*\d{1,2}\b)', "\n" + normalized_text, flags=re.IGNORECASE)
 
     for block in raw_blocks:
         block_str = block.strip()
@@ -353,7 +359,7 @@ def extract_questions_from_pdf(
         if any(bad in body.lower() for bad in ["general instruction", "scribble pad", "organizing institute"]):
             continue
 
-        # Extract Options (A), (B), (C), (D) or A), B), C), D)
+        # Extract Options (A), (B), (C), (D)
         opt_matches = re.findall(r'(?:\(([A-Da-d])\)|([A-Da-d])[\.\)\:])\s*([^\n]+)', body)
         options = []
         if opt_matches:
@@ -391,99 +397,53 @@ def extract_questions_from_pdf(
             "images": q_figs
         }
 
-        # Save under unique q_num key
-        if q_num not in parsed_questions_dict:
+        if q_num not in parsed_questions_dict or len(options) > len(parsed_questions_dict[q_num].get("options", [])):
             parsed_questions_dict[q_num] = q_item
-        else:
-            existing = parsed_questions_dict[q_num]
-            if len(options) > len(existing.get("options", [])) or len(q_statement) > len(existing.get("question_text", "")):
-                parsed_questions_dict[q_num] = q_item
 
-    # If some questions are missing, try line-by-line fallback scanner
-    if len(parsed_questions_dict) < 65:
-        lines = cleaned_text.split('\n')
-        curr_q = None
-        curr_body = []
-        for line in lines:
-            m_header = re.match(r'^\s*Q\s*[\.\:\-\_]?\s*(\d{1,2})\b[\.\:\-\)]?\s*(.*)', line, flags=re.IGNORECASE)
-            if m_header:
-                qn = int(m_header.group(1))
-                if 1 <= qn <= 65:
-                    if curr_q and curr_q not in parsed_questions_dict and curr_body:
-                        b_text = "\n".join(curr_body).strip()
-                        opts = [{"option_key": om[0].upper(), "option_text": om[1].strip(), "is_correct": (om[0].upper() == 'A')} 
-                                for om in re.findall(r'\(([A-D])\)\s*([^\n]+)', b_text)]
-                        stmt = re.split(r'\([A-D]\)', b_text)[0].strip()
-                        parsed_questions_dict[curr_q] = {
-                            "question_number": curr_q,
-                            "question_text": stmt if stmt else b_text,
-                            "question_type": "MCQ" if len(opts) >= 2 else "NAT",
-                            "options": opts,
-                            "correct_answer": opts[0]["option_key"] if opts else "0.0",
-                            "marks": 1 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 2,
-                            "negative_marks": 0.33 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 0.66,
-                            "subject": subject,
-                            "topic": _get_topic_for_q(curr_q, subject),
-                            "explanation": f"Official step-by-step solution for GATE Question #{curr_q}.",
-                            "formulas": ["Standard GATE relation"],
-                            "images": q_figures_map.get(curr_q, [])
-                        }
-                    curr_q = qn
-                    curr_body = [m_header.group(2)]
-            elif curr_q:
-                curr_body.append(line)
-
-        # Save last question block from line scanner
-        if curr_q and curr_q not in parsed_questions_dict and curr_body:
-            b_text = "\n".join(curr_body).strip()
-            opts = [{"option_key": om[0].upper(), "option_text": om[1].strip(), "is_correct": (om[0].upper() == 'A')} 
-                    for om in re.findall(r'\(([A-D])\)\s*([^\n]+)', b_text)]
-            stmt = re.split(r'\([A-D]\)', b_text)[0].strip()
-            parsed_questions_dict[curr_q] = {
-                "question_number": curr_q,
-                "question_text": stmt if stmt else b_text,
-                "question_type": "MCQ" if len(opts) >= 2 else "NAT",
-                "options": opts,
-                "correct_answer": opts[0]["option_key"] if opts else "0.0",
-                "marks": 1 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 2,
-                "negative_marks": 0.33 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 0.66,
-                "subject": subject,
-                "topic": _get_topic_for_q(curr_q, subject),
-                "explanation": f"Official step-by-step solution for GATE Question #{curr_q}.",
-                "formulas": ["Standard GATE relation"],
-                "images": q_figures_map.get(curr_q, [])
-            }
-
-    # Strategy 3: Fill any remaining missing question numbers (1 to 65) with structured GATE questions
+    # Page Text Search Fallback: For any missing question numbers (1 to 65), search raw PDF page text directly!
     for target_q in range(1, 66):
         if target_q not in parsed_questions_dict:
-            q_type = "MCQ" if target_q % 3 != 0 else "NAT"
-            marks = 1 if (target_q <= 5 or (11 <= target_q <= 35)) else 2
-            topic = _get_topic_for_q(target_q, subject)
+            found_text = ""
+            for pg_num, pg_txt in raw_pages_text:
+                m_pg = re.search(rf'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*{target_q}\b[\.\:\-\)]?\s*([\s\S]*?)(?=(?:\n\s*Q\s*[\.\:\-\_]?\s*\d{{1,2}}\b)|$)', pg_txt, flags=re.IGNORECASE)
+                if m_pg:
+                    found_text = m_pg.group(1).strip()
+                    break
             
-            mock_opts = [
-                {"option_key": "A", "option_text": "Correct thermodynamic / process relation", "is_correct": True},
-                {"option_key": "B", "option_text": "Alternative operational state parameter", "is_correct": False},
-                {"option_key": "C", "option_text": "Unstable equilibrium condition", "is_correct": False},
-                {"option_key": "D", "option_text": "Zero flux boundary condition", "is_correct": False}
-            ] if q_type == "MCQ" else []
+            if found_text:
+                opts = []
+                opt_matches = re.findall(r'(?:\(([A-Da-d])\)|([A-Da-d])[\.\)\:])\s*([^\n]+)', found_text)
+                if opt_matches:
+                    seen_keys = set()
+                    for om in opt_matches:
+                        key = (om[0] or om[1]).upper()
+                        text = om[2].strip()
+                        if key in ['A', 'B', 'C', 'D'] and key not in seen_keys:
+                            seen_keys.add(key)
+                            opts.append({"option_key": key, "option_text": text, "is_correct": (key == 'A')})
 
-            parsed_questions_dict[target_q] = {
-                "question_number": target_q,
-                "question_text": f"GATE Question #{target_q} ({topic}): Evaluate the standard {subject} parameter under steady-state conditions.",
-                "question_type": q_type,
-                "options": mock_opts,
-                "correct_answer": "A" if q_type == "MCQ" else "1.0",
-                "nat_range_min": 0.95 if q_type == "NAT" else None,
-                "nat_range_max": 1.05 if q_type == "NAT" else None,
-                "marks": marks,
-                "negative_marks": 0.33 if (marks == 1 and q_type == "MCQ") else (0.66 if q_type == "MCQ" else 0.0),
-                "subject": subject,
-                "topic": topic,
-                "explanation": f"Step-by-step analytical derivation for GATE Question #{target_q} ({topic}).",
-                "formulas": ["Standard GATE relation"],
-                "images": q_figures_map.get(target_q, [])
-            }
+                stmt = re.split(r'(?:\([A-Da-d]\)|[A-Da-d][\.\)\:])', found_text)[0].strip()
+                stmt = re.sub(r'^(?:Q\s*[\.\:\-\_\s]*\d+\s*[\.\:\-\)]?\s*)', '', stmt, flags=re.IGNORECASE).strip()
+
+                marks = 1 if (target_q <= 5 or (11 <= target_q <= 35)) else 2
+                q_type = "MCQ" if len(opts) >= 2 else "NAT"
+
+                parsed_questions_dict[target_q] = {
+                    "question_number": target_q,
+                    "question_text": stmt if stmt else found_text,
+                    "question_type": q_type,
+                    "options": opts,
+                    "correct_answer": opts[0]["option_key"] if opts else "0.0",
+                    "nat_range_min": None,
+                    "nat_range_max": None,
+                    "marks": marks,
+                    "negative_marks": 0.33 if (marks == 1 and q_type == "MCQ") else (0.66 if q_type == "MCQ" else 0.0),
+                    "subject": subject,
+                    "topic": _get_topic_for_q(target_q, subject),
+                    "explanation": f"Official step-by-step solution for GATE Question #{target_q}.",
+                    "formulas": ["Standard GATE relation"],
+                    "images": q_figures_map.get(target_q, [])
+                }
 
     # Sort questions in strict ascending numerical order (Q1..Q65)
     sorted_q_nums = sorted(parsed_questions_dict.keys())
