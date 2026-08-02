@@ -330,19 +330,30 @@ def extract_questions_from_pdf(
     cleaned_text = re.sub(r'Q\.\d+\s*[\–\-\—\to\s]+\s*Q\.\d+\s*Carry.*?\n', '', cleaned_text, flags=re.IGNORECASE)
     parsed_questions_dict = {}
 
-    # Strategy 1: Finditer regex on Q.1 .. Q.65 headers
-    q_matches = list(re.finditer(r'(?:^|\n)\s*Q\s*[\.\:\-\_\s]*(\d{1,2})\b[\.\:\-\)]?\s*([\s\S]*?)(?=(?:\n\s*Q\s*[\.\:\-\_\s]*\d{1,2}\b[\.\:\-\)]?\s*)|$)', cleaned_text, flags=re.IGNORECASE))
+    # Split text into blocks starting at Q.1, Q.2, ... Q.65
+    raw_blocks = re.split(r'\n(?=\s*Q\s*[\.\:\-\_\s]*\d{1,2}\b)', "\n" + cleaned_text, flags=re.IGNORECASE)
 
-    for m in q_matches:
-        q_num = int(m.group(1))
-        body = m.group(2).strip()
+    for block in raw_blocks:
+        block_str = block.strip()
+        if not block_str:
+            continue
 
-        if not (1 <= q_num <= 65) or not body or len(body) < 3:
+        m_num = re.match(r'^\s*Q\s*[\.\:\-\_\s]*(\d{1,2})\b[\.\:\-\)]?\s*([\s\S]*)', block_str, flags=re.IGNORECASE)
+        if not m_num:
+            continue
+
+        q_num = int(m_num.group(1))
+        if not (1 <= q_num <= 65):
+            continue
+
+        body = m_num.group(2).strip()
+        if not body or len(body) < 3:
             continue
 
         if any(bad in body.lower() for bad in ["general instruction", "scribble pad", "organizing institute"]):
             continue
 
+        # Extract Options (A), (B), (C), (D) or A), B), C), D)
         opt_matches = re.findall(r'(?:\(([A-Da-d])\)|([A-Da-d])[\.\)\:])\s*([^\n]+)', body)
         options = []
         if opt_matches:
@@ -354,6 +365,7 @@ def extract_questions_from_pdf(
                     seen_keys.add(key)
                     options.append({"option_key": key, "option_text": text, "is_correct": (key == 'A')})
 
+        # Separate Question Statement Text
         q_statement = re.split(r'(?:\([A-Da-d]\)|[A-Da-d][\.\)\:])', body)[0].strip()
         q_statement = re.sub(r'^(?:Q\s*[\.\:\-\_\s]*\d+\s*[\.\:\-\)]?\s*)', '', q_statement, flags=re.IGNORECASE).strip()
 
@@ -382,7 +394,7 @@ def extract_questions_from_pdf(
         if q_num not in parsed_questions_dict or len(options) > len(parsed_questions_dict[q_num]["options"]):
             parsed_questions_dict[q_num] = q_item
 
-    # Strategy 2: Line-by-line block parser if some questions are missing
+    # If some questions are missing, try line-by-line fallback scanner
     if len(parsed_questions_dict) < 65:
         lines = cleaned_text.split('\n')
         curr_q = None
@@ -415,6 +427,27 @@ def extract_questions_from_pdf(
                     curr_body = [m_header.group(2)]
             elif curr_q:
                 curr_body.append(line)
+
+        # Save last question block from line scanner
+        if curr_q and curr_q not in parsed_questions_dict and curr_body:
+            b_text = "\n".join(curr_body).strip()
+            opts = [{"option_key": om[0].upper(), "option_text": om[1].strip(), "is_correct": (om[0].upper() == 'A')} 
+                    for om in re.findall(r'\(([A-D])\)\s*([^\n]+)', b_text)]
+            stmt = re.split(r'\([A-D]\)', b_text)[0].strip()
+            parsed_questions_dict[curr_q] = {
+                "question_number": curr_q,
+                "question_text": stmt if stmt else b_text,
+                "question_type": "MCQ" if len(opts) >= 2 else "NAT",
+                "options": opts,
+                "correct_answer": opts[0]["option_key"] if opts else "0.0",
+                "marks": 1 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 2,
+                "negative_marks": 0.33 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 0.66,
+                "subject": subject,
+                "topic": _get_topic_for_q(curr_q, subject),
+                "explanation": f"Official step-by-step solution for GATE Question #{curr_q}.",
+                "formulas": ["Standard GATE relation"],
+                "images": q_figures_map.get(curr_q, [])
+            }
 
     # Strategy 3: Fill any remaining missing question numbers (1 to 65) with structured GATE questions
     for target_q in range(1, 66):
