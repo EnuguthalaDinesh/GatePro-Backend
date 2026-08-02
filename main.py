@@ -57,6 +57,17 @@ def safe_parse_json(val):
             return []
     return []
 
+def safe_json_dumps(obj):
+    def default_serializer(o):
+        if hasattr(o, "model_dump"):
+            return o.model_dump()
+        if hasattr(o, "dict"):
+            return o.dict()
+        if hasattr(o, "__dict__"):
+            return o.__dict__
+        return str(o)
+    return json.dumps(obj, default=default_serializer)
+
 # Pydantic Request Models
 class UserRegisterModel(BaseModel):
     username: str
@@ -382,7 +393,7 @@ def save_paper_and_questions_to_db(paper_data: dict, pdf_bytes: bytes, file_hash
                     paper_id, paper_id, q_num, paper_data["subject"], topic, q_text, q_type,
                     marks, neg_marks, corr_ans, nat_min, nat_max,
                     paper_data["difficulty"], explanation,
-                    json.dumps(formulas_list), json.dumps(options_list)
+                    safe_json_dumps(formulas_list), safe_json_dumps(options_list)
                 ))
                 question_id = cursor.fetchone()["id"]
 
@@ -530,31 +541,37 @@ async def upload_pdf_paper_pipeline(
     title: Optional[str] = Form(None),
     user: dict = Depends(get_current_user_required)
 ):
-    pdf_bytes = await file.read()
-    if not pdf_bytes or len(pdf_bytes) < 100:
-        raise HTTPException(status_code=400, detail="Invalid or empty PDF file uploaded.")
+    try:
+        pdf_bytes = await file.read()
+        if not pdf_bytes or len(pdf_bytes) < 100:
+            raise HTTPException(status_code=400, detail="Invalid or empty PDF file uploaded.")
 
-    file_hash = compute_pdf_hash(pdf_bytes)
+        file_hash = compute_pdf_hash(pdf_bytes)
 
-    paper_data = extract_questions_from_pdf(
-        pdf_bytes=pdf_bytes,
-        year=year,
-        subject=subject,
-        title=title or f"GATE {year} Official {subject} Paper (Uploaded PDF)"
-    )
+        paper_data = extract_questions_from_pdf(
+            pdf_bytes=pdf_bytes,
+            year=year,
+            subject=subject,
+            title=title or f"GATE {year} Official {subject} Paper (Uploaded PDF)"
+        )
 
-    paper_id = save_paper_and_questions_to_db(paper_data, pdf_bytes, file_hash)
+        paper_id = save_paper_and_questions_to_db(paper_data, pdf_bytes, file_hash)
 
-    return {
-        "status": "success",
-        "paper_id": paper_id,
-        "pyq_id": paper_id,
-        "file_hash": file_hash,
-        "pdf_path": f"/uploads/pdfs/{file_hash}.pdf",
-        "total_questions": paper_data["total_questions"],
-        "total_marks": paper_data["total_marks"],
-        "message": f"Successfully processed and published '{paper_data['title']}' ({paper_data['total_questions']} questions) into PostgreSQL!"
-    }
+        return {
+            "status": "success",
+            "paper_id": paper_id,
+            "pyq_id": paper_id,
+            "file_hash": file_hash,
+            "pdf_path": f"/uploads/pdfs/{file_hash}.pdf",
+            "total_questions": paper_data["total_questions"],
+            "total_marks": paper_data["total_marks"],
+            "message": f"Successfully processed and published '{paper_data['title']}' ({paper_data['total_questions']} questions) into PostgreSQL!"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PDF Upload Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF Processing failed: {str(e)}")
 
 @app.post("/api/pyq/upload")
 def upload_pyq_paper(paper_json: dict, user: dict = Depends(get_current_user_required)):
