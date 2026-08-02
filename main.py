@@ -436,7 +436,7 @@ def save_paper_and_questions_to_db(paper_data: dict, pdf_bytes: bytes, file_hash
         raise
     except Exception as e:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Database insertion failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Database insertion failed: {str(e)}")
     finally:
         conn.close()
 
@@ -545,7 +545,7 @@ async def upload_pdf_paper_pipeline(
     year: int = Form(2024),
     subject: str = Form("Chemical Engineering"),
     title: Optional[str] = Form(None),
-    user: dict = Depends(get_current_user_required)
+    user: Optional[dict] = Depends(get_current_user_optional)
 ):
     try:
         pdf_bytes = await file.read()
@@ -580,7 +580,7 @@ async def upload_pdf_paper_pipeline(
         raise
     except Exception as e:
         logger.error(f"PDF Upload Error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"PDF Processing failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"PDF Processing failed: {str(e)}")
 
 @app.post("/api/pyq/upload")
 def upload_pyq_paper(paper_json: dict, user: dict = Depends(get_current_user_required)):
