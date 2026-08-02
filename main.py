@@ -23,6 +23,16 @@ os.makedirs("uploads/pdfs", exist_ok=True)
 os.makedirs("uploads/images", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+@app.on_event("startup")
+def on_startup():
+    """Automatically run database migrations and seed default data on startup."""
+    try:
+        from seed import seed_database
+        seed_database()
+    except Exception as e:
+        print(f"[Startup Notice] Database initialization/seed: {e}")
+
+
 # Enable CORS (configurable via ALLOWED_ORIGINS env variable in production)
 allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "*")
 allowed_origins = [origin.strip() for origin in allowed_origins_raw.split(",")] if allowed_origins_raw != "*" else ["*"]
