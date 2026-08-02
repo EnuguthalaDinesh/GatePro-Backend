@@ -121,33 +121,13 @@ def clean_pdf_raw_text(text: str) -> str:
 
 def convert_pdf_to_page_images(pdf_bytes: bytes, file_hash: str, output_dir: str = "uploads/images") -> List[Dict[str, Any]]:
     """
-    Converts PDF pages into PNG images using PyMuPDF (fitz) and saves to output_dir.
-    Returns list of page info dicts: [{"page_number": 1, "image_path": "...", "image_url": "..."}]
+    Lightweight metadata provider to avoid 20-second synchronous page rendering delays on serverless/cloud instances.
     """
-    os.makedirs(output_dir, exist_ok=True)
-    pages_info = []
-
-    if fitz:
-        try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            for i, page in enumerate(doc):
-                pix = page.get_pixmap(dpi=150)
-                img_name = f"page_{file_hash}_{i+1}.png"
-                img_path = os.path.join(output_dir, img_name)
-                pix.save(img_path)
-                pages_info.append({
-                    "page_number": i + 1,
-                    "image_path": img_path,
-                    "image_url": f"/uploads/images/{img_name}"
-                })
-        except Exception as e:
-            print("PyMuPDF Page Image Conversion Error:", e)
-
-    return pages_info
+    return []
 
 def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str = "uploads/images") -> Dict[int, List[Dict[str, Any]]]:
     """
-    Extracts embedded raster images and vector diagrams from PDF pages and maps them ONLY to questions that contain figures.
+    Fast extraction of embedded diagrams/figures from PDF pages. Maps figures ONLY to questions containing figures.
     Returns dict mapping question_number -> list of image dicts: {5: [{"image_url": "...", "caption": "..."}]}
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -163,17 +143,11 @@ def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str =
             pg_num = page_idx + 1
             text = page.get_text("text") or ""
             
-            # Remove section headers like "Q.1 – Q.5 Carry ONE mark Each" before finding real question numbers
             clean_pg_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*(?:[\–\—\-\s]|to)+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', text, flags=re.IGNORECASE)
-            
-            # Find real question numbers on this page (e.g. Q.1, Q.2, Q.3...)
             page_q_matches = list(re.finditer(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,3})\b', clean_pg_text, flags=re.IGNORECASE))
             page_q_nums = [int(m.group(1)) for m in page_q_matches if 1 <= int(m.group(1)) <= 100]
             
             image_list = page.get_images(full=True)
-            drawings = page.get_drawings()
-            
-            # Extract raster images first
             for img_index, img in enumerate(image_list):
                 try:
                     xref = img[0]
@@ -181,7 +155,6 @@ def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str =
                     image_bytes = base_image["image"]
                     image_ext = base_image["ext"]
                     
-                    # Skip logos/watermarks/icons
                     if len(image_bytes) < 1800:
                         continue
 
@@ -203,27 +176,6 @@ def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str =
                     fig_count += 1
                 except Exception as ie:
                     print("Single image extraction error:", ie)
-
-            # If page has vector drawings (charts/curves/flowsheets) and page has questions
-            if drawings and page_q_nums and not image_list:
-                for qn in page_q_nums:
-                    if qn not in q_figures_map:
-                        try:
-                            rects = page.search_for(f"Q.{qn}") or page.search_for(f"Q{qn}")
-                            if rects:
-                                q_rect = rects[0]
-                                crop_box = fitz.Rect(page.rect.x0 + 15, q_rect.y0 + 15, page.rect.width - 15, min(q_rect.y0 + 280, page.rect.height - 15))
-                                pix = page.get_pixmap(dpi=150, clip=crop_box)
-                                crop_name = f"crop_{file_hash}_q{qn}.png"
-                                crop_path = os.path.join(output_dir, crop_name)
-                                pix.save(crop_path)
-                                q_figures_map.setdefault(qn, []).append({
-                                    "image_path": crop_path,
-                                    "image_url": f"/uploads/images/{crop_name}",
-                                    "caption": f"Question #{qn} Diagram"
-                                })
-                        except Exception as ce:
-                            print(f"Crop error for Q{qn}:", ce)
 
     except Exception as e:
         print("Figure extraction error:", e)
