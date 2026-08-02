@@ -147,59 +147,86 @@ def convert_pdf_to_page_images(pdf_bytes: bytes, file_hash: str, output_dir: str
 
 def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str = "uploads/images") -> Dict[int, List[Dict[str, Any]]]:
     """
-    Extracts embedded diagrams/figures from PDF pages and maps them ONLY to questions that contain figures.
+    Extracts embedded raster images and vector diagrams from PDF pages and maps them ONLY to questions that contain figures.
     Returns dict mapping question_number -> list of image dicts: {5: [{"image_url": "...", "caption": "..."}]}
     """
     os.makedirs(output_dir, exist_ok=True)
     q_figures_map = {}
 
-    if fitz:
-        try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            fig_count = 1
-            for page_idx, page in enumerate(doc):
-                pg_num = page_idx + 1
-                text = page.get_text("text") or ""
-                
-                # Find all question numbers printed on this page
-                page_q_matches = list(re.finditer(r'\bQ\s*[\.\:\-\_]?\s*(\d{1,2})\b', text, flags=re.IGNORECASE))
-                page_q_nums = [int(m.group(1)) for m in page_q_matches if 1 <= int(m.group(1)) <= 65]
-                
-                image_list = page.get_images(full=True)
-                for img_index, img in enumerate(image_list):
-                    try:
-                        xref = img[0]
-                        base_image = doc.extract_image(xref)
-                        image_bytes = base_image["image"]
-                        image_ext = base_image["ext"]
-                        
-                        # Skip tiny icons or watermarks
-                        if len(image_bytes) < 1500:
-                            continue
+    if not fitz:
+        return q_figures_map
 
-                        fig_name = f"fig_{file_hash}_p{pg_num}_{fig_count}.{image_ext}"
-                        fig_path = os.path.join(output_dir, fig_name)
-                        with open(fig_path, "wb") as f:
-                            f.write(image_bytes)
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        fig_count = 1
+        for page_idx, page in enumerate(doc):
+            pg_num = page_idx + 1
+            text = page.get_text("text") or ""
+            
+            # Remove section headers like "Q.1 – Q.5 Carry ONE mark Each" before finding real question numbers
+            clean_pg_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*[\–\-\—\to\s]+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', text, flags=re.IGNORECASE)
+            
+            # Find real question numbers on this page (e.g. Q.1, Q.2, Q.3...)
+            page_q_matches = list(re.finditer(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,3})\b', clean_pg_text, flags=re.IGNORECASE))
+            page_q_nums = [int(m.group(1)) for m in page_q_matches if 1 <= int(m.group(1)) <= 100]
+            
+            image_list = page.get_images(full=True)
+            drawings = page.get_drawings()
+            
+            # Extract raster images first
+            for img_index, img in enumerate(image_list):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image_ext = base_image["ext"]
+                    
+                    # Skip logos/watermarks/icons
+                    if len(image_bytes) < 1800:
+                        continue
 
-                        img_obj = {
-                            "image_path": fig_path,
-                            "image_url": f"/uploads/images/{fig_name}",
-                            "caption": f"Question Diagram (Figure {fig_count})"
-                        }
-                        
-                        # Map to question numbers on this page
-                        if page_q_nums:
-                            # Attach to nearest question number on this page
-                            target_q = page_q_nums[min(img_index, len(page_q_nums) - 1)]
-                            q_figures_map.setdefault(target_q, []).append(img_obj)
-                        
-                        fig_count += 1
-                    except Exception as ie:
-                        print("Single image extraction error:", ie)
+                    fig_name = f"fig_{file_hash}_p{pg_num}_{fig_count}.{image_ext}"
+                    fig_path = os.path.join(output_dir, fig_name)
+                    with open(fig_path, "wb") as f:
+                        f.write(image_bytes)
 
-        except Exception as e:
-            print("Figure extraction error:", e)
+                    img_obj = {
+                        "image_path": fig_path,
+                        "image_url": f"/uploads/images/{fig_name}",
+                        "caption": f"Question Diagram (Figure {fig_count})"
+                    }
+                    
+                    if page_q_nums:
+                        target_q = page_q_nums[min(img_index, len(page_q_nums) - 1)]
+                        q_figures_map.setdefault(target_q, []).append(img_obj)
+                    
+                    fig_count += 1
+                except Exception as ie:
+                    print("Single image extraction error:", ie)
+
+            # If page has vector drawings (charts/curves/flowsheets) and page has questions
+            if drawings and page_q_nums and not image_list:
+                for qn in page_q_nums:
+                    if qn not in q_figures_map:
+                        try:
+                            rects = page.search_for(f"Q.{qn}") or page.search_for(f"Q{qn}")
+                            if rects:
+                                q_rect = rects[0]
+                                crop_box = fitz.Rect(page.rect.x0 + 15, q_rect.y0 + 15, page.rect.width - 15, min(q_rect.y0 + 280, page.rect.height - 15))
+                                pix = page.get_pixmap(dpi=150, clip=crop_box)
+                                crop_name = f"crop_{file_hash}_q{qn}.png"
+                                crop_path = os.path.join(output_dir, crop_name)
+                                pix.save(crop_path)
+                                q_figures_map.setdefault(qn, []).append({
+                                    "image_path": crop_path,
+                                    "image_url": f"/uploads/images/{crop_name}",
+                                    "caption": f"Question #{qn} Diagram"
+                                })
+                        except Exception as ce:
+                            print(f"Crop error for Q{qn}:", ce)
+
+    except Exception as e:
+        print("Figure extraction error:", e)
 
     return q_figures_map
 
@@ -321,7 +348,7 @@ def extract_questions_from_pdf(
     # 4. Join and normalize full text across all pages
     full_raw_text = "\n\n".join([t[1] for t in raw_pages_text])
 
-    # Pre-process text to join headers and option labels split across table cells
+    # Clean header noise, watermarks, institute footers
     normalized_text = full_raw_text.replace('\r\n', '\n').replace('\r', '\n')
     normalized_text = clean_pdf_raw_text(normalized_text)
     normalized_text = re.sub(r'https?://\S+|www\.\S+|\S+\.testbook\.com\S*', '', normalized_text, flags=re.IGNORECASE)
@@ -329,29 +356,29 @@ def extract_questions_from_pdf(
     normalized_text = re.sub(r'Page\s*\d+\s*of\s*\d+', '', normalized_text, flags=re.IGNORECASE)
     normalized_text = re.sub(r'Chemical\s*Engineering\s*\([A-Z]+\)', '', normalized_text, flags=re.IGNORECASE)
 
-    # Normalize split Q headers & split option labels
-    normalized_text = re.sub(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,2})\b[\.\:\-\)]?\s*\n\s*', r'\nQ.\1 ', normalized_text, flags=re.IGNORECASE)
+    # CRITICAL: Remove section header banners like "Q.1 – Q.5 Carry ONE mark Each"
+    normalized_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*[\–\-\—\to\s]+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', normalized_text, flags=re.IGNORECASE)
+
+    # Pre-process split headers and split option labels
+    normalized_text = re.sub(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,3})\b[\.\:\-\)]?\s*\n\s*', r'\nQ.\1 ', normalized_text, flags=re.IGNORECASE)
     normalized_text = re.sub(r'\(([A-Da-d])\)\s*\n\s*', r'(\1) ', normalized_text)
     normalized_text = re.sub(r'(?:^|\n)\s*([A-Da-d])[\.\:\)]\s*\n\s*', r'(\1) ', normalized_text)
 
     parsed_questions_dict = {}
 
-    # Primary Splitter: Split into blocks by question header Q.1, Q.2 ... Q.65
-    raw_blocks = re.split(r'\n(?=\s*Q\s*[\.\:\-\_\s]*\d{1,2}\b)', "\n" + normalized_text, flags=re.IGNORECASE)
+    # Extract question blocks matching Q.1, Q.2, Q.3 ... Q.N
+    raw_blocks = re.split(r'\n(?=\s*Q\s*[\.\:\-\_\s]*\d{1,3}\b)', "\n" + normalized_text, flags=re.IGNORECASE)
 
     for block in raw_blocks:
         block_str = block.strip()
         if not block_str:
             continue
 
-        m_num = re.match(r'^\s*Q\s*[\.\:\-\_\s]*(\d{1,2})\b[\.\:\-\)]?\s*([\s\S]*)', block_str, flags=re.IGNORECASE)
+        m_num = re.match(r'^\s*Q\s*[\.\:\-\_\s]*(\d{1,3})\b[\.\:\-\)]?\s*([\s\S]*)', block_str, flags=re.IGNORECASE)
         if not m_num:
             continue
 
         q_num = int(m_num.group(1))
-        if not (1 <= q_num <= 65):
-            continue
-
         body = m_num.group(2).strip()
         if not body or len(body) < 3:
             continue
@@ -392,7 +419,7 @@ def extract_questions_from_pdf(
             "negative_marks": neg_marks,
             "subject": subject,
             "topic": _get_topic_for_q(q_num, subject),
-            "explanation": f"Official step-by-step solution for GATE Question #{q_num}.",
+            "explanation": f"Official step-by-step solution for Question #{q_num}.",
             "formulas": ["Standard GATE relation"],
             "images": q_figs
         }
@@ -400,50 +427,58 @@ def extract_questions_from_pdf(
         if q_num not in parsed_questions_dict or len(options) > len(parsed_questions_dict[q_num].get("options", [])):
             parsed_questions_dict[q_num] = q_item
 
-    # Page Text Search Fallback: For any missing question numbers (1 to 65), search raw PDF page text directly!
-    for target_q in range(1, 66):
-        if target_q not in parsed_questions_dict:
-            found_text = ""
-            for pg_num, pg_txt in raw_pages_text:
-                m_pg = re.search(rf'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*{target_q}\b[\.\:\-\)]?\s*([\s\S]*?)(?=(?:\n\s*Q\s*[\.\:\-\_]?\s*\d{{1,2}}\b)|$)', pg_txt, flags=re.IGNORECASE)
-                if m_pg:
-                    found_text = m_pg.group(1).strip()
-                    break
-            
-            if found_text:
-                opts = []
-                opt_matches = re.findall(r'(?:\(([A-Da-d])\)|([A-Da-d])[\.\)\:])\s*([^\n]+)', found_text)
-                if opt_matches:
-                    seen_keys = set()
-                    for om in opt_matches:
-                        key = (om[0] or om[1]).upper()
-                        text = om[2].strip()
-                        if key in ['A', 'B', 'C', 'D'] and key not in seen_keys:
-                            seen_keys.add(key)
-                            opts.append({"option_key": key, "option_text": text, "is_correct": (key == 'A')})
+    # If no questions found via block splitting, attempt line-by-line fallback scanner
+    if not parsed_questions_dict:
+        lines = normalized_text.split('\n')
+        curr_q = None
+        curr_body = []
+        for line in lines:
+            m_h = re.match(r'^\s*Q\s*[\.\:\-\_]?\s*(\d{1,3})\b[\.\:\-\)]?\s*(.*)', line, flags=re.IGNORECASE)
+            if m_h:
+                qn = int(m_h.group(1))
+                if curr_q and curr_body:
+                    b_txt = "\n".join(curr_body).strip()
+                    opts = [{"option_key": om[0].upper(), "option_text": om[1].strip(), "is_correct": (om[0].upper() == 'A')} 
+                            for om in re.findall(r'\(([A-D])\)\s*([^\n]+)', b_txt)]
+                    stmt = re.split(r'\([A-D]\)', b_txt)[0].strip()
+                    parsed_questions_dict[curr_q] = {
+                        "question_number": curr_q,
+                        "question_text": stmt if stmt else b_txt,
+                        "question_type": "MCQ" if len(opts) >= 2 else "NAT",
+                        "options": opts,
+                        "correct_answer": opts[0]["option_key"] if opts else "0.0",
+                        "marks": 1 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 2,
+                        "negative_marks": 0.33 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 0.66,
+                        "subject": subject,
+                        "topic": _get_topic_for_q(curr_q, subject),
+                        "explanation": f"Official step-by-step solution for Question #{curr_q}.",
+                        "formulas": ["Standard GATE relation"],
+                        "images": q_figures_map.get(curr_q, [])
+                    }
+                curr_q = qn
+                curr_body = [m_h.group(2)]
+            elif curr_q:
+                curr_body.append(line)
 
-                stmt = re.split(r'(?:\([A-Da-d]\)|[A-Da-d][\.\)\:])', found_text)[0].strip()
-                stmt = re.sub(r'^(?:Q\s*[\.\:\-\_\s]*\d+\s*[\.\:\-\)]?\s*)', '', stmt, flags=re.IGNORECASE).strip()
-
-                marks = 1 if (target_q <= 5 or (11 <= target_q <= 35)) else 2
-                q_type = "MCQ" if len(opts) >= 2 else "NAT"
-
-                parsed_questions_dict[target_q] = {
-                    "question_number": target_q,
-                    "question_text": stmt if stmt else found_text,
-                    "question_type": q_type,
-                    "options": opts,
-                    "correct_answer": opts[0]["option_key"] if opts else "0.0",
-                    "nat_range_min": None,
-                    "nat_range_max": None,
-                    "marks": marks,
-                    "negative_marks": 0.33 if (marks == 1 and q_type == "MCQ") else (0.66 if q_type == "MCQ" else 0.0),
-                    "subject": subject,
-                    "topic": _get_topic_for_q(target_q, subject),
-                    "explanation": f"Official step-by-step solution for GATE Question #{target_q}.",
-                    "formulas": ["Standard GATE relation"],
-                    "images": q_figures_map.get(target_q, [])
-                }
+        if curr_q and curr_body:
+            b_txt = "\n".join(curr_body).strip()
+            opts = [{"option_key": om[0].upper(), "option_text": om[1].strip(), "is_correct": (om[0].upper() == 'A')} 
+                    for om in re.findall(r'\(([A-D])\)\s*([^\n]+)', b_txt)]
+            stmt = re.split(r'\([A-D]\)', b_txt)[0].strip()
+            parsed_questions_dict[curr_q] = {
+                "question_number": curr_q,
+                "question_text": stmt if stmt else b_txt,
+                "question_type": "MCQ" if len(opts) >= 2 else "NAT",
+                "options": opts,
+                "correct_answer": opts[0]["option_key"] if opts else "0.0",
+                "marks": 1 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 2,
+                "negative_marks": 0.33 if (curr_q <= 5 or (11 <= curr_q <= 35)) else 0.66,
+                "subject": subject,
+                "topic": _get_topic_for_q(curr_q, subject),
+                "explanation": f"Official step-by-step solution for Question #{curr_q}.",
+                "formulas": ["Standard GATE relation"],
+                "images": q_figures_map.get(curr_q, [])
+            }
 
     # Sort questions in strict ascending numerical order (Q1..Q65)
     sorted_q_nums = sorted(parsed_questions_dict.keys())
