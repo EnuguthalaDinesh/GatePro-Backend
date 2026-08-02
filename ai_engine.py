@@ -1,3 +1,13 @@
+"""
+AI Engine for GatePro:
+- AI-Powered PDF Question & Options Extractor with Vision LLM & Page Image Rendering
+- SHA-256 PDF File Hash & Duplicate Prevention helper
+- Page Images & Embedded Figure Image Extractor (PyMuPDF)
+- Pydantic Extracted JSON Schema Validation
+- Custom GATE Question Paper Generator
+- Markdown Textbook Parser & Formula Shortcut Extractor
+- AI Friend MIKE Chatbot & Doubt Solver
+"""
 
 import os
 import io
@@ -172,6 +182,128 @@ def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str =
 
     return q_figures_map
 
+# ----------------- GENERIC (NON-GATE) QUESTION FORMAT FALLBACK -----------------
+# The block-split logic above is tuned for the "Q.1 / Q.2 / ..." GATE paper
+# format. Many other PDFs number questions differently ("1.", "1)", "Question 1",
+# "Q1" with no punctuation, etc.). These helpers detect which numbering style is
+# actually used in a given PDF and parse questions generically, so uploads of
+# non-GATE-formatted PDFs don't silently return 0 questions.
+
+# Each candidate: (label, regex matching ONE header occurrence with a single
+# capturing group for the question number). Order matters: more specific /
+# less ambiguous patterns are tried first.
+_GENERIC_HEADER_CANDIDATES = [
+    ("Q.N (dot/colon/dash)", r'Q\s*[\.\:\-\_]\s*(\d{1,3})\b'),
+    ("Question N",           r'Question\s*[\.\:\-\_]?\s*(\d{1,3})\b'),
+    ("QN (no separator)",    r'Q(\d{1,3})\b'),
+    ("N. / N)",              r'^[ \t]*(\d{1,3})[\.\)][ \t]+(?=[A-Za-z(])'),
+]
+
+def _longest_sequential_run(numbers: List[int]) -> int:
+    """Given question numbers in document order, find the longest run where
+    each next number is equal to or exactly one more than the previous
+    (duplicates from OCR noise are tolerated). Used to score how likely a
+    candidate header pattern is to be the PDF's real numbering scheme,
+    versus incidental numeric matches inside body text."""
+    if not numbers:
+        return 0
+    best = run = 1
+    for i in range(1, len(numbers)):
+        if numbers[i] == numbers[i - 1] or numbers[i] == numbers[i - 1] + 1:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 1
+    return best
+
+def _detect_question_header_pattern(text: str):
+    """Try each candidate header regex against the text and return the
+    (label, regex_source, match_count) of whichever pattern produces the
+    longest plausible sequential run of question numbers (1, 2, 3, ...).
+    Returns None if nothing scores well enough to trust."""
+    best_choice = None
+    best_score = 0
+    for label, pattern in _GENERIC_HEADER_CANDIDATES:
+        try:
+            matches = list(re.finditer(pattern, text, flags=re.IGNORECASE | re.MULTILINE))
+        except re.error:
+            continue
+        nums = [int(m.group(1)) for m in matches if int(m.group(1)) <= 300]
+        if len(nums) < 3:
+            print(f"[pdf-extract] pattern '{label}': only {len(nums)} matches, skipping")
+            continue
+        run = _longest_sequential_run(nums)
+        print(f"[pdf-extract] pattern '{label}': {len(nums)} matches, longest sequential run={run}")
+        # Require a decent run (at least 3 in sequence) and prefer patterns
+        # whose matches are MOSTLY the sequential run (fewer false positives).
+        score = run if run >= 3 else 0
+        if score > best_score:
+            best_score = score
+            best_choice = (label, pattern, len(nums))
+    if best_choice:
+        print(f"[pdf-extract] chosen header pattern: '{best_choice[0]}' (run score={best_score})")
+    else:
+        print("[pdf-extract] no reliable question-numbering pattern detected in text")
+    return best_choice
+
+def _generic_parse_questions(text: str, header_pattern: str, q_figures_map: dict, subject: str) -> dict:
+    """Generic block-based question parser for any numbering style detected
+    by _detect_question_header_pattern. Mirrors the option/statement
+    extraction logic used for the GATE-specific path, but without assuming
+    'Q.' prefixed headers."""
+    parsed = {}
+    split_regex = r'\n(?=' + header_pattern + r')'
+    blocks = re.split(split_regex, "\n" + text, flags=re.IGNORECASE | re.MULTILINE)
+    header_match_re = r'^\s*' + header_pattern + r'\s*[\.\:\-\)]?\s*([\s\S]*)'
+
+    for block in blocks:
+        block_str = block.strip()
+        if not block_str:
+            continue
+        m = re.match(header_match_re, block_str, flags=re.IGNORECASE)
+        if not m:
+            continue
+        q_num = int(m.group(1))
+        body = m.group(2).strip()
+        if not body or len(body) < 3:
+            continue
+        if any(bad in body.lower() for bad in ["general instruction", "scribble pad"]):
+            continue
+
+        opt_matches = re.findall(r'(?:\(([A-Da-d])\)|([A-Da-d])[\.\)\:])\s*([^\n]+)', body)
+        options = []
+        seen_keys = set()
+        for om in opt_matches:
+            key = (om[0] or om[1]).upper()
+            opt_text = om[2].strip()
+            if key in ['A', 'B', 'C', 'D'] and key not in seen_keys:
+                seen_keys.add(key)
+                options.append({"option_key": key, "option_text": opt_text, "is_correct": (key == 'A')})
+
+        q_statement = re.split(r'(?:\([A-Da-d]\)|[A-Da-d][\.\)\:])', body)[0].strip()
+        q_type = "MCQ" if len(options) >= 2 else "NAT"
+
+        q_item = {
+            "question_number": q_num,
+            "question_text": q_statement if (q_statement and len(q_statement) > 3) else body,
+            "question_type": q_type,
+            "options": options,
+            "correct_answer": options[0]["option_key"] if options else "0.0",
+            "nat_range_min": None,
+            "nat_range_max": None,
+            "marks": 1,
+            "negative_marks": 0.33 if (q_type == "MCQ") else 0.0,
+            "subject": subject,
+            "topic": _get_topic_for_q(q_num, subject),
+            "explanation": f"Solution for Question #{q_num}.",
+            "formulas": [],
+            "images": q_figures_map.get(q_num, [])
+        }
+        if q_num not in parsed or len(options) > len(parsed[q_num].get("options", [])):
+            parsed[q_num] = q_item
+
+    return parsed
+
 # ----------------- VISION LLM EXTRACTION & FALLBACK -----------------
 
 def vision_extract_page_questions(image_path: str, page_num: int, year: int, subject: str) -> List[dict]:
@@ -258,6 +390,11 @@ def extract_questions_from_pdf(
     5. Validates extracted JSON schema using Pydantic.
     """
     file_hash = compute_pdf_hash(pdf_bytes)
+    debug_info = {
+        "fitz_available": fitz is not None,
+        "pypdf_available": pypdf is not None,
+        "pdf_bytes": len(pdf_bytes),
+    }
 
     # 1. Convert PDF pages to PNG images
     page_images = convert_pdf_to_page_images(pdf_bytes, file_hash, output_dir)
@@ -266,29 +403,43 @@ def extract_questions_from_pdf(
     q_figures_map = extract_figures_from_pdf(pdf_bytes, file_hash, output_dir)
 
     # 3. Read text from all PDF pages via PyMuPDF or PyPDF
+    print(f"[pdf-extract] fitz available: {fitz is not None} | pypdf available: {pypdf is not None} | pdf_bytes: {len(pdf_bytes)} bytes")
     raw_pages_text = []
     if fitz:
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            print(f"[pdf-extract] fitz opened PDF OK, {len(doc)} pages")
             for i, page in enumerate(doc):
                 txt = page.get_text()
                 if txt and len(txt.strip()) > 5:
                     raw_pages_text.append((i + 1, txt))
         except Exception as e:
             print("PyMuPDF Text Extract Error:", e)
+    print(f"[pdf-extract] pages with usable text via fitz: {len(raw_pages_text)}")
 
     if not raw_pages_text and pypdf:
         try:
             reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            print(f"[pdf-extract] pypdf opened PDF OK, {len(reader.pages)} pages")
             for i, page in enumerate(reader.pages):
                 txt = page.extract_text()
                 if txt and len(txt.strip()) > 5:
                     raw_pages_text.append((i + 1, txt))
         except Exception as e:
             print("PyPDF Extract Error:", e)
+        print(f"[pdf-extract] pages with usable text via pypdf: {len(raw_pages_text)}")
+
+    if not raw_pages_text:
+        print("[pdf-extract] WARNING: no text could be extracted from ANY page via fitz or pypdf. "
+              "This PDF is likely scanned/image-only (no embedded text layer), or fitz/pypdf "
+              "failed to import/parse it. Check the two log lines above for import availability.")
+
+    debug_info["pages_with_text"] = len(raw_pages_text)
 
     # 4. Join and normalize full text across all pages
     full_raw_text = "\n\n".join([t[1] for t in raw_pages_text])
+    print(f"[pdf-extract] total raw extracted text length: {len(full_raw_text)} chars")
+    debug_info["raw_text_chars"] = len(full_raw_text)
 
     # Clean header noise, watermarks, institute footers
     normalized_text = full_raw_text.replace('\r\n', '\n').replace('\r', '\n')
@@ -378,6 +529,9 @@ def extract_questions_from_pdf(
         if q_num not in parsed_questions_dict or len(options) > len(parsed_questions_dict[q_num].get("options", [])):
             parsed_questions_dict[q_num] = q_item
 
+    print(f"[pdf-extract] GATE-style block-split found {len(parsed_questions_dict)} questions")
+    debug_info["gate_style_matches"] = len(parsed_questions_dict)
+
     # If no questions found via block splitting, attempt line-by-line fallback scanner
     if not parsed_questions_dict:
         lines = normalized_text.split('\n')
@@ -430,6 +584,25 @@ def extract_questions_from_pdf(
                 "formulas": ["Standard GATE relation"],
                 "images": q_figures_map.get(curr_q, [])
             }
+        print(f"[pdf-extract] line-by-line fallback found {len(parsed_questions_dict)} questions")
+
+    # If the GATE-specific "Q.N" logic still found nothing at all, this PDF
+    # is probably using a different numbering convention entirely
+    # ("1.", "1)", "Question 1", "Q1" without punctuation, etc). Try to
+    # auto-detect the actual pattern used and parse generically.
+    if not parsed_questions_dict:
+        print("[pdf-extract] GATE-style parsing found 0 questions — attempting generic multi-format detection")
+        detected = _detect_question_header_pattern(normalized_text)
+        if detected:
+            label, pattern, match_count = detected
+            parsed_questions_dict = _generic_parse_questions(normalized_text, pattern, q_figures_map, subject)
+            print(f"[pdf-extract] generic pattern '{label}' parsing found {len(parsed_questions_dict)} questions")
+            debug_info["generic_pattern_used"] = label
+            debug_info["generic_pattern_matches"] = len(parsed_questions_dict)
+        else:
+            print("[pdf-extract] no usable question-numbering pattern found anywhere in the extracted text. "
+                  "The PDF may be scanned/image-only, encrypted, or in a format this parser cannot recognize.")
+            debug_info["generic_pattern_used"] = None
 
     # Sort questions in strict ascending numerical order (Q1..Q65)
     sorted_q_nums = sorted(parsed_questions_dict.keys())
@@ -486,6 +659,23 @@ def extract_questions_from_pdf(
             except ValidationError as ve2:
                 print(f"Pydantic question validation FAILED on Q#{q_raw.get('question_number')}, skipping question:", ve2)
                 continue
+
+    if not validated_questions:
+        sample = normalized_text.strip()[:300].replace("\n", " ") if 'normalized_text' in dir() and normalized_text.strip() else "(no text extracted at all)"
+        raise ValueError(
+            "No questions could be extracted. Diagnostics — "
+            f"fitz(PyMuPDF) available: {debug_info.get('fitz_available')}, "
+            f"pypdf available: {debug_info.get('pypdf_available')}, "
+            f"pages with text: {debug_info.get('pages_with_text', 0)}, "
+            f"raw text extracted: {debug_info.get('raw_text_chars', 0)} chars, "
+            f"GATE 'Q.N' pattern matches: {debug_info.get('gate_style_matches', 0)}, "
+            f"generic pattern used: {debug_info.get('generic_pattern_used')}. "
+            f"Text sample: \"{sample}\". "
+            "If 'pages with text' is 0, the PDF is likely scanned/image-only (no selectable text layer) "
+            "and needs OCR, which this pipeline does not currently do. "
+            "If text was extracted but 0 questions matched, the question-numbering format "
+            "in this PDF isn't recognized by either the GATE-style or generic parsers."
+        )
 
     paper_title = title or f"GATE {year} Official {subject} Paper (Uploaded PDF)"
     total_marks = sum(q.marks for q in validated_questions)
