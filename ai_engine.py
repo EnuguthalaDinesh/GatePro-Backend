@@ -164,7 +164,7 @@ def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str =
             text = page.get_text("text") or ""
             
             # Remove section headers like "Q.1 – Q.5 Carry ONE mark Each" before finding real question numbers
-            clean_pg_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*[\–\-\—\to\s]+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', text, flags=re.IGNORECASE)
+            clean_pg_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*(?:[\–\—\-\s]|to)+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', text, flags=re.IGNORECASE)
             
             # Find real question numbers on this page (e.g. Q.1, Q.2, Q.3...)
             page_q_matches = list(re.finditer(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,3})\b', clean_pg_text, flags=re.IGNORECASE))
@@ -357,7 +357,7 @@ def extract_questions_from_pdf(
     normalized_text = re.sub(r'Chemical\s*Engineering\s*\([A-Z]+\)', '', normalized_text, flags=re.IGNORECASE)
 
     # CRITICAL: Remove section header banners like "Q.1 – Q.5 Carry ONE mark Each"
-    normalized_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*[\–\-\—\to\s]+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'Q\s*[\.\:\-\_]?\s*\d{1,3}\s*(?:[\–\—\-\s]|to)+\s*Q\s*[\.\:\-\_]?\s*\d{1,3}\s*Carry.*?\n', '', normalized_text, flags=re.IGNORECASE)
 
     # Pre-process split headers and split option labels
     normalized_text = re.sub(r'(?:^|\n)\s*Q\s*[\.\:\-\_]?\s*(\d{1,3})\b[\.\:\-\)]?\s*\n\s*', r'\nQ.\1 ', normalized_text, flags=re.IGNORECASE)
