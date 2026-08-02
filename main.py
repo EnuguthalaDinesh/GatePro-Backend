@@ -45,6 +45,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_val(obj, key, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        res = obj.get(key, default)
+        return res if res is not None else default
+    if hasattr(obj, key):
+        res = getattr(obj, key, default)
+        return res if res is not None else default
+    return default
+
 def safe_parse_json(val):
     if val is None:
         return []
@@ -368,19 +379,19 @@ def save_paper_and_questions_to_db(paper_data: dict, pdf_bytes: bytes, file_hash
 
             # 3. Insert questions, options, question_images
             for i, q in enumerate(paper_data["questions"], 1):
-                q_num = q.get("question_number", i)
-                q_text = q.get("question_text", f"Question {q_num}")
-                q_type = q.get("question_type", "MCQ")
-                marks = q.get("marks", 1)
-                neg_marks = q.get("negative_marks", 0.33)
-                corr_ans = str(q.get("correct_answer", "A"))
-                topic = q.get("topic", "General")
-                explanation = q.get("explanation", "")
-                nat_min = q.get("nat_range_min")
-                nat_max = q.get("nat_range_max")
+                q_num = get_val(q, "question_number", i)
+                q_text = get_val(q, "question_text", f"Question {q_num}")
+                q_type = get_val(q, "question_type", "MCQ")
+                marks = get_val(q, "marks", 1)
+                neg_marks = get_val(q, "negative_marks", 0.33)
+                corr_ans = str(get_val(q, "correct_answer", "A"))
+                topic = get_val(q, "topic", "General")
+                explanation = get_val(q, "explanation", "")
+                nat_min = get_val(q, "nat_range_min")
+                nat_max = get_val(q, "nat_range_max")
 
-                options_list = q.get("options", [])
-                formulas_list = q.get("formulas", [])
+                options_list = get_val(q, "options", [])
+                formulas_list = get_val(q, "formulas", [])
 
                 cursor.execute("""
                 INSERT INTO questions (
@@ -399,14 +410,9 @@ def save_paper_and_questions_to_db(paper_data: dict, pdf_bytes: bytes, file_hash
 
                 # 4. Insert into options table
                 for o_idx, opt in enumerate(options_list):
-                    if isinstance(opt, dict):
-                        key = opt.get("option_key", chr(65 + o_idx))
-                        text = opt.get("option_text", opt.get("text", ""))
-                        is_corr = opt.get("is_correct", key == corr_ans)
-                    else:
-                        key = chr(65 + o_idx)
-                        text = str(opt)
-                        is_corr = (key == corr_ans)
+                    key = get_val(opt, "option_key", chr(65 + o_idx))
+                    text = get_val(opt, "option_text", get_val(opt, "text", str(opt)))
+                    is_corr = get_val(opt, "is_correct", key == corr_ans)
 
                     cursor.execute("""
                     INSERT INTO options (question_id, option_key, option_text, is_correct)
@@ -414,10 +420,10 @@ def save_paper_and_questions_to_db(paper_data: dict, pdf_bytes: bytes, file_hash
                     """, (question_id, key, text, is_corr))
 
                 # 5. Insert into question_images table
-                for img in q.get("images", []):
-                    img_url = img.get("url") or img.get("image_url") if isinstance(img, dict) else str(img)
-                    caption = img.get("caption", "Question Diagram") if isinstance(img, dict) else "Diagram"
-                    if img_url:
+                for img in get_val(q, "images", []):
+                    img_url = get_val(img, "image_url", get_val(img, "url", str(img)))
+                    caption = get_val(img, "caption", "Question Diagram")
+                    if img_url and isinstance(img_url, str):
                         cursor.execute("""
                         INSERT INTO question_images (question_id, image_url, caption)
                         VALUES (%s, %s, %s);
