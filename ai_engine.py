@@ -112,9 +112,9 @@ def compute_pdf_hash(pdf_bytes: bytes) -> str:
 def clean_pdf_raw_text(text: str) -> str:
     """Cleans URLs, candidate instructions, cover pages, and header/footer noise from PDF text."""
     text = re.sub(r'https?://\S+|www\.\S+|\S+\.(?:com|in|org|net|ac\.in)\S*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'Page\s*\d+\s*of\s*\d+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'Page\s*\d+\s*of\s*\d+[^\n]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'Organizing\s*Institute[^\n]*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'GATE\s*\d{4}\s*.*?\n', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'Organizing\s*Institute.*?\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'Computer\s*Based\s*Test.*?\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'Scribble\s*Pad.*?\n', '', text, flags=re.IGNORECASE)
     return text
@@ -304,8 +304,8 @@ def extract_questions_from_pdf(
     normalized_text = full_raw_text.replace('\r\n', '\n').replace('\r', '\n')
     normalized_text = clean_pdf_raw_text(normalized_text)
     normalized_text = re.sub(r'https?://\S+|www\.\S+|\S+\.testbook\.com\S*', '', normalized_text, flags=re.IGNORECASE)
-    normalized_text = re.sub(r'Organizing\s*Institute.*?\n', '', normalized_text, flags=re.IGNORECASE)
-    normalized_text = re.sub(r'Page\s*\d+\s*of\s*\d+', '', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'Organizing\s*Institute[^\n]*', '', normalized_text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r'Page\s*\d+\s*of\s*\d+[^\n]*', '', normalized_text, flags=re.IGNORECASE)
     normalized_text = re.sub(r'Chemical\s*Engineering\s*\([A-Z]+\)', '', normalized_text, flags=re.IGNORECASE)
 
     # CRITICAL: Remove section header banners like "Q.1 – Q.5 Carry ONE mark Each"
@@ -332,10 +332,12 @@ def extract_questions_from_pdf(
 
         q_num = int(m_num.group(1))
         body = m_num.group(2).strip()
+        body = re.sub(r'Organizing\s*Institute[^\n]*', '', body, flags=re.IGNORECASE).strip()
+        body = re.sub(r'Page\s*\d+\s*of\s*\d+[^\n]*', '', body, flags=re.IGNORECASE).strip()
         if not body or len(body) < 3:
             continue
 
-        if any(bad in body.lower() for bad in ["general instruction", "scribble pad", "organizing institute"]):
+        if any(bad in body.lower() for bad in ["general instruction", "scribble pad"]):
             continue
 
         # Extract Options (A), (B), (C), (D)

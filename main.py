@@ -561,6 +561,9 @@ async def upload_pdf_paper_pipeline(
             title=title or f"GATE {year} Official {subject} Paper (Uploaded PDF)"
         )
 
+        if not paper_data.get("questions") or paper_data.get("total_questions", 0) == 0:
+            raise HTTPException(status_code=400, detail="No questions could be extracted from this PDF. Please verify that the PDF contains readable text.")
+
         paper_id = save_paper_and_questions_to_db(paper_data, pdf_bytes, file_hash)
 
         return {
