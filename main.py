@@ -611,16 +611,49 @@ def upload_pyq_paper(paper_json: dict, user: dict = Depends(get_current_user_req
         conn.close()
 
 @app.delete("/api/pyq/paper/{pyq_id}")
+@app.delete("/api/admin/papers/{pyq_id}")
 def delete_paper(pyq_id: int, user: dict = Depends(get_current_user_required)):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin permissions required")
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM questions WHERE pyq_id = %s", (pyq_id,))
+            # Cascading delete options and images for this paper's questions
+            cursor.execute("""
+            DELETE FROM options 
+            WHERE question_id IN (SELECT id FROM questions WHERE paper_id = %s OR pyq_id = %s)
+            """, (pyq_id, pyq_id))
+            
+            cursor.execute("""
+            DELETE FROM question_images 
+            WHERE question_id IN (SELECT id FROM questions WHERE paper_id = %s OR pyq_id = %s)
+            """, (pyq_id, pyq_id))
+
+            cursor.execute("DELETE FROM questions WHERE pyq_id = %s OR paper_id = %s", (pyq_id, pyq_id))
             cursor.execute("DELETE FROM pyqs WHERE id = %s", (pyq_id,))
+            cursor.execute("DELETE FROM papers WHERE id = %s", (pyq_id,))
             conn.commit()
-            return {"status": "success", "message": "Paper deleted successfully"}
+            return {"status": "success", "message": f"Paper #{pyq_id} deleted successfully from database!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.delete("/api/admin/papers/clear-all")
+def clear_all_papers(user: dict = Depends(get_current_user_required)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin permissions required")
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM options")
+            cursor.execute("DELETE FROM question_images")
+            cursor.execute("DELETE FROM questions")
+            cursor.execute("DELETE FROM pyqs")
+            cursor.execute("DELETE FROM papers")
+            conn.commit()
+            return {"status": "success", "message": "All papers and questions cleared from PostgreSQL database!"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -637,7 +670,10 @@ def get_admin_stats(user: dict = Depends(get_current_user_required)):
     try:
         with conn.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) AS count FROM pyqs")
-            total_papers = cursor.fetchone()["count"]
+            pyq_count = cursor.fetchone()["count"]
+            cursor.execute("SELECT COUNT(*) AS count FROM papers")
+            paper_count = cursor.fetchone()["count"]
+            total_papers = max(pyq_count, paper_count)
             
             cursor.execute("SELECT COUNT(*) AS count FROM questions")
             total_questions = cursor.fetchone()["count"]
@@ -648,8 +684,11 @@ def get_admin_stats(user: dict = Depends(get_current_user_required)):
             cursor.execute("SELECT COUNT(*) AS count FROM test_results")
             total_tests_attempted = cursor.fetchone()["count"]
             
-            cursor.execute("SELECT * FROM pyqs ORDER BY created_at DESC")
+            cursor.execute("SELECT * FROM pyqs ORDER BY id DESC")
             all_papers = [dict(r) for r in cursor.fetchall()]
+            if not all_papers:
+                cursor.execute("SELECT * FROM papers ORDER BY id DESC")
+                all_papers = [dict(r) for r in cursor.fetchall()]
 
             return {
                 "total_papers": total_papers,
