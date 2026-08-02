@@ -310,22 +310,21 @@ def save_paper_and_questions_to_db(paper_data: dict, pdf_bytes: bytes, file_hash
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # 1. Duplicate detection: Check file_hash or matching year+subject+title
-            cursor.execute("SELECT id, title FROM papers WHERE file_hash = %s", (file_hash,))
+            # 1. Duplicate handling: If duplicate file_hash or matching title exists, delete old entry so it gets replaced
+            cursor.execute("SELECT id FROM papers WHERE file_hash = %s", (file_hash,))
             dup_hash = cursor.fetchone()
-            if dup_hash:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Duplicate Paper Upload Prevented! A PDF paper titled '{dup_hash['title']}' with matching SHA-256 hash '{file_hash[:10]}...' has already been ingested."
-                )
+            if not dup_hash:
+                cursor.execute("SELECT id FROM pyqs WHERE title = %s AND year = %s AND subject = %s", (paper_data["title"], paper_data["year"], paper_data["subject"]))
+                dup_hash = cursor.fetchone()
 
-            cursor.execute("SELECT id, title FROM papers WHERE year = %s AND subject = %s AND title = %s", (paper_data["year"], paper_data["subject"], paper_data["title"]))
-            dup_sig = cursor.fetchone()
-            if dup_sig:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Duplicate Paper Upload Prevented! A paper titled '{dup_sig['title']}' ({paper_data['year']} {paper_data['subject']}) already exists."
-                )
+            if dup_hash:
+                old_id = dup_hash["id"]
+                cursor.execute("DELETE FROM options WHERE question_id IN (SELECT id FROM questions WHERE paper_id = %s OR pyq_id = %s)", (old_id, old_id))
+                cursor.execute("DELETE FROM question_images WHERE question_id IN (SELECT id FROM questions WHERE paper_id = %s OR pyq_id = %s)", (old_id, old_id))
+                cursor.execute("DELETE FROM questions WHERE pyq_id = %s OR paper_id = %s", (old_id, old_id))
+                cursor.execute("DELETE FROM pyqs WHERE id = %s", (old_id,))
+                cursor.execute("DELETE FROM papers WHERE id = %s", (old_id,))
+                conn.commit()
 
             # 2. Insert into papers table
             cursor.execute("""
