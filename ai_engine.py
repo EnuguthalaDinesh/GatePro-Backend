@@ -376,7 +376,7 @@ def extract_questions_from_pdf(
 
         q_item = {
             "question_number": q_num,
-            "question_text": q_statement if q_statement else body,
+            "question_text": q_statement if (q_statement and len(q_statement) > 3) else body,
             "question_type": q_type,
             "options": options,
             "correct_answer": options[0]["option_key"] if options else "0.0",
@@ -391,8 +391,13 @@ def extract_questions_from_pdf(
             "images": q_figs
         }
 
-        if q_num not in parsed_questions_dict or len(options) > len(parsed_questions_dict[q_num]["options"]):
+        # Save under unique q_num key
+        if q_num not in parsed_questions_dict:
             parsed_questions_dict[q_num] = q_item
+        else:
+            existing = parsed_questions_dict[q_num]
+            if len(options) > len(existing.get("options", [])) or len(q_statement) > len(existing.get("question_text", "")):
+                parsed_questions_dict[q_num] = q_item
 
     # If some questions are missing, try line-by-line fallback scanner
     if len(parsed_questions_dict) < 65:
@@ -490,11 +495,11 @@ def extract_questions_from_pdf(
 
     # 5. JSON Schema Validation via Pydantic
     validated_questions = []
-    for idx, q_raw in enumerate(deduped_raw_list, 1):
-        q_raw["question_number"] = idx
+    for q_raw in deduped_raw_list:
         q_raw["subject"] = subject
+        q_num_val = q_raw.get("question_number", 1)
         if not q_raw.get("topic"):
-            q_raw["topic"] = _get_topic_for_q(idx, subject)
+            q_raw["topic"] = _get_topic_for_q(q_num_val, subject)
 
         # Format options into OptionSchema objects if passed as plain strings
         opts_formatted = []
