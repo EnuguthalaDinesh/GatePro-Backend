@@ -145,44 +145,63 @@ def convert_pdf_to_page_images(pdf_bytes: bytes, file_hash: str, output_dir: str
 
     return pages_info
 
-def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str = "uploads/images") -> List[Dict[str, Any]]:
+def extract_figures_from_pdf(pdf_bytes: bytes, file_hash: str, output_dir: str = "uploads/images") -> Dict[int, List[Dict[str, Any]]]:
     """
-    Extracts embedded raster images/figures from PDF pages using PyMuPDF.
-    Returns list of extracted figure dicts: [{"page_number": 1, "image_url": "...", "caption": "..."}]
+    Extracts embedded diagrams/figures from PDF pages and maps them ONLY to questions that contain figures.
+    Returns dict mapping question_number -> list of image dicts: {5: [{"image_url": "...", "caption": "..."}]}
     """
     os.makedirs(output_dir, exist_ok=True)
-    figures = []
+    q_figures_map = {}
 
     if fitz:
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             fig_count = 1
             for page_idx, page in enumerate(doc):
+                pg_num = page_idx + 1
+                text = page.get_text("text") or ""
+                
+                # Find all question numbers printed on this page
+                page_q_matches = list(re.finditer(r'\bQ\s*[\.\:\-\_]?\s*(\d{1,2})\b', text, flags=re.IGNORECASE))
+                page_q_nums = [int(m.group(1)) for m in page_q_matches if 1 <= int(m.group(1)) <= 65]
+                
                 image_list = page.get_images(full=True)
                 for img_index, img in enumerate(image_list):
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image_ext = base_image["ext"]
-                    if len(image_bytes) < 2000:  # Skip tiny icons/logos
-                        continue
-                    
-                    fig_name = f"fig_{file_hash}_p{page_idx+1}_{fig_count}.{image_ext}"
-                    fig_path = os.path.join(output_dir, fig_name)
-                    with open(fig_path, "wb") as f:
-                        f.write(image_bytes)
-                    
-                    figures.append({
-                        "page_number": page_idx + 1,
-                        "image_path": fig_path,
-                        "image_url": f"/uploads/images/{fig_name}",
-                        "caption": f"Figure {fig_count} (Page {page_idx+1})"
-                    })
-                    fig_count += 1
+                    try:
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image_ext = base_image["ext"]
+                        
+                        # Skip tiny icons or watermarks
+                        if len(image_bytes) < 1500:
+                            continue
+
+                        fig_name = f"fig_{file_hash}_p{pg_num}_{fig_count}.{image_ext}"
+                        fig_path = os.path.join(output_dir, fig_name)
+                        with open(fig_path, "wb") as f:
+                            f.write(image_bytes)
+
+                        img_obj = {
+                            "image_path": fig_path,
+                            "image_url": f"/uploads/images/{fig_name}",
+                            "caption": f"Question Diagram (Figure {fig_count})"
+                        }
+                        
+                        # Map to question numbers on this page
+                        if page_q_nums:
+                            # Attach to nearest question number on this page
+                            target_q = page_q_nums[min(img_index, len(page_q_nums) - 1)]
+                            q_figures_map.setdefault(target_q, []).append(img_obj)
+                        
+                        fig_count += 1
+                    except Exception as ie:
+                        print("Single image extraction error:", ie)
+
         except Exception as e:
             print("Figure extraction error:", e)
 
-    return figures
+    return q_figures_map
 
 # ----------------- VISION LLM EXTRACTION & FALLBACK -----------------
 
@@ -274,16 +293,8 @@ def extract_questions_from_pdf(
     # 1. Convert PDF pages to PNG images
     page_images = convert_pdf_to_page_images(pdf_bytes, file_hash, output_dir)
 
-    # 2. Extract embedded figures/diagrams
-    extracted_figures = extract_figures_from_pdf(pdf_bytes, file_hash, output_dir)
-
-    page_figures_map = {}
-    for fig in extracted_figures:
-        pg = fig["page_number"]
-        page_figures_map.setdefault(pg, []).append({
-            "url": fig["image_url"],
-            "caption": fig["caption"]
-        })
+    # 2. Extract embedded figures/diagrams mapped to question numbers
+    q_figures_map = extract_figures_from_pdf(pdf_bytes, file_hash, output_dir)
 
     # 3. Read text from all PDF pages via PyMuPDF or PyPDF
     raw_pages_text = []
@@ -309,13 +320,13 @@ def extract_questions_from_pdf(
 
     full_text = "\n\n".join([t[1] for t in raw_pages_text])
     full_text = full_text.replace('\r\n', '\n').replace('\r', '\n')
-    cleaned_text = clean_pdf_raw_text(full_text)
 
     # Clean out cover page, watermarks, headers, footers
     cleaned_text = clean_pdf_raw_text(full_text)
     cleaned_text = re.sub(r'https?://\S+|www\.\S+|\S+\.testbook\.com\S*', '', cleaned_text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r'Organizing\s*Institute.*?\n', '', cleaned_text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r'Page\s*\d+\s*of\s*\d+', '', cleaned_text, flags=re.IGNORECASE)
+    cleaned_text = re.sub(r'Chemical\s*Engineering\s*\([A-Z]+\)', '', cleaned_text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r'Q\.\d+\s*[\–\-\—\to\s]+\s*Q\.\d+\s*Carry.*?\n', '', cleaned_text, flags=re.IGNORECASE)
     parsed_questions_dict = {}
 
@@ -349,7 +360,7 @@ def extract_questions_from_pdf(
         q_type = "MSQ" if ("select all" in body.lower() or "multiple select" in body.lower()) else ("MCQ" if len(options) >= 2 else "NAT")
         marks = 1 if (q_num <= 5 or (11 <= q_num <= 35)) else 2
         neg_marks = 0.66 if (marks == 2 and q_type == "MCQ") else (0.33 if (marks == 1 and q_type == "MCQ") else 0.0)
-        q_figs = page_figures_map.get((q_num // 2) + 1, [])
+        q_figs = q_figures_map.get(q_num, [])
 
         q_item = {
             "question_number": q_num,
@@ -398,7 +409,7 @@ def extract_questions_from_pdf(
                             "topic": _get_topic_for_q(curr_q, subject),
                             "explanation": f"Official step-by-step solution for GATE Question #{curr_q}.",
                             "formulas": ["Standard GATE relation"],
-                            "images": page_figures_map.get((curr_q // 2) + 1, [])
+                            "images": q_figures_map.get(curr_q, [])
                         }
                     curr_q = qn
                     curr_body = [m_header.group(2)]
@@ -433,7 +444,7 @@ def extract_questions_from_pdf(
                 "topic": topic,
                 "explanation": f"Step-by-step analytical derivation for GATE Question #{target_q} ({topic}).",
                 "formulas": ["Standard GATE relation"],
-                "images": page_figures_map.get((target_q // 2) + 1, [])
+                "images": q_figures_map.get(target_q, [])
             }
 
     # Sort questions in strict ascending numerical order (Q1..Q65)
